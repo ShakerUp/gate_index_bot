@@ -2,27 +2,25 @@ import os
 import time
 import html
 import requests
+import pytz
 from datetime import datetime
-from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
+
+load_dotenv()
 
 # =========================
 # НАСТРОЙКИ
 # =========================
-load_dotenv()
-
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN не найден в .env")
-
 
 TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 GATE_BASE = "https://www.gate.com/apiw/v2/futures"
 SETTLE = "usdt"
 
-KYIV_TZ = ZoneInfo("Europe/Kyiv")
-UTC_TZ = ZoneInfo("UTC")
+KYIV_TZ = pytz.timezone("Europe/Kyiv")
+UTC_TZ = pytz.utc
 
 MAX_PERIOD_HOURS = 8
 MAX_PERIOD_SECONDS = MAX_PERIOD_HOURS * 60 * 60
@@ -44,7 +42,7 @@ HELP_TEXT = """
 /avg POLYX_USDT 17.03.2026 21:20 17.03.2026 21:41
 /avg5 POLYX_USDT 17.03.2026 21:20 17.03.2026 21:41
 
-Время вводится по Украине (Europe/Kyiv).
+Время вводится по Украине.
 Максимальный период: 8 часов.
 """.strip()
 
@@ -52,14 +50,14 @@ HELP_TEXT = """
 # =========================
 # TELEGRAM
 # =========================
-def tg_request(method: str, data: dict | None = None, timeout: int = 60):
+def tg_request(method, data=None, timeout=60):
     url = f"{TELEGRAM_API}/{method}"
     response = requests.post(url, data=data or {}, timeout=timeout)
     response.raise_for_status()
     return response.json()
 
 
-def send_message(chat_id: int, text: str):
+def send_message(chat_id, text):
     tg_request(
         "sendMessage",
         {
@@ -70,7 +68,7 @@ def send_message(chat_id: int, text: str):
     )
 
 
-def get_updates(offset: int | None = None, timeout: int = 50):
+def get_updates(offset=None, timeout=50):
     params = {
         "timeout": timeout,
         "allowed_updates": '["message"]',
@@ -90,26 +88,27 @@ def get_updates(offset: int | None = None, timeout: int = 50):
 # =========================
 # ВРЕМЯ
 # =========================
-def parse_kyiv_datetime(date_str: str, time_str: str) -> int:
-    dt_local = datetime.strptime(f"{date_str} {time_str}", "%d.%m.%Y %H:%M")
-    dt_local = dt_local.replace(tzinfo=KYIV_TZ)
-    dt_utc = dt_local.astimezone(UTC_TZ)
-    return int(dt_utc.timestamp())
+def parse_kyiv_datetime(date_str, time_str):
+    naive_dt = datetime.strptime(f"{date_str} {time_str}", "%d.%m.%Y %H:%M")
+    local_dt = KYIV_TZ.localize(naive_dt)
+    utc_dt = local_dt.astimezone(UTC_TZ)
+    return int(utc_dt.timestamp())
 
 
-def format_ts_kyiv(ts: int) -> str:
-    dt = datetime.fromtimestamp(ts, tz=UTC_TZ).astimezone(KYIV_TZ)
-    return dt.strftime("%d.%m.%Y %H:%M")
+def format_ts_kyiv(ts):
+    utc_dt = datetime.fromtimestamp(ts, tz=UTC_TZ)
+    kyiv_dt = utc_dt.astimezone(KYIV_TZ)
+    return kyiv_dt.strftime("%d.%m.%Y %H:%M")
 
 
-def align_down(ts: int, step: int) -> int:
+def align_down(ts, step):
     return ts - (ts % step)
 
 
 # =========================
 # GATE API
 # =========================
-def gate_get_premium_index(contract: str, from_ts: int, to_ts: int, interval: str):
+def gate_get_premium_index(contract, from_ts, to_ts, interval):
     url = f"{GATE_BASE}/{SETTLE}/premium_index"
     params = {
         "contract": contract.upper(),
@@ -141,11 +140,20 @@ def gate_get_premium_index(contract: str, from_ts: int, to_ts: int, interval: st
 # =========================
 # РАСЧЁТ
 # =========================
-def get_c_value(item: dict) -> float:
+def get_c_value(item):
+    if "c" not in item:
+        raise ValueError(f"В записи нет поля 'c': {item}")
     return float(item["c"])
 
 
-def build_series(items: list[dict], from_ts: int, to_ts: int, step_seconds: int):
+def build_series(items, from_ts, to_ts, step_seconds):
+    """
+    Строит ряд по точкам внутри диапазона [from_ts, to_ts).
+
+    Логика:
+    - если API вернул c=0, это учитывается как реальный 0
+    - если точки вообще нет, это пропуск
+    """
     if not items:
         raise ValueError("Gate не вернул данных за этот период")
 
@@ -183,22 +191,29 @@ def build_series(items: list[dict], from_ts: int, to_ts: int, step_seconds: int)
     return values, stats
 
 
-def calculate_average_deviation_percent(values: list[float], absolute: bool = False) -> float:
+def calculate_average_deviation_percent(values, absolute=False):
+    if not values:
+        raise ValueError("Нет значений для расчёта")
+
     if absolute:
         avg = sum(abs(v) for v in values) / len(values)
     else:
         avg = sum(values) / len(values)
+
     return avg * 100
 
 
-def run_avg(chat_id: int, text: str, interval: str, step_seconds: int):
+# =========================
+# ОСНОВНАЯ ЛОГИКА КОМАНД
+# =========================
+def run_avg(chat_id, text, interval, step_seconds):
     parts = text.strip().split()
 
     if len(parts) != 6:
         send_message(
             chat_id,
             "Неверный формат.\n\n"
-            "<b>Пример:</b>\n"
+            "<b>Примеры:</b>\n"
             "<code>/avg POLYX_USDT 17.03.2026 21:20 17.03.2026 21:41</code>\n"
             "<code>/avg5 POLYX_USDT 17.03.2026 21:20 17.03.2026 21:41</code>"
         )
@@ -213,7 +228,7 @@ def run_avg(chat_id: int, text: str, interval: str, step_seconds: int):
         send_message(
             chat_id,
             "Ошибка в дате/времени.\n\n"
-            "Формат:\n"
+            "Используй формат:\n"
             "<code>DD.MM.YYYY HH:MM</code>"
         )
         return
@@ -222,11 +237,11 @@ def run_avg(chat_id: int, text: str, interval: str, step_seconds: int):
         send_message(chat_id, "Конец периода должен быть позже начала.")
         return
 
-    if to_ts_raw - from_ts_raw > MAX_PERIOD_SECONDS:
+    if (to_ts_raw - from_ts_raw) > MAX_PERIOD_SECONDS:
         send_message(chat_id, f"Максимальный период — {MAX_PERIOD_HOURS} часов.")
         return
 
-    if to_ts_raw - from_ts_raw < step_seconds:
+    if (to_ts_raw - from_ts_raw) < step_seconds:
         send_message(chat_id, f"Минимальный период для {interval} — {step_seconds // 60} мин.")
         return
 
@@ -266,7 +281,7 @@ def run_avg(chat_id: int, text: str, interval: str, step_seconds: int):
         send_message(chat_id, f"Ошибка:\n<code>{html.escape(str(e))}</code>")
 
 
-def handle_message(message: dict):
+def handle_message(message):
     chat_id = message["chat"]["id"]
     text = message.get("text", "").strip()
 
@@ -292,9 +307,6 @@ def handle_message(message: dict):
 # MAIN LOOP
 # =========================
 def main():
-    if not BOT_TOKEN or BOT_TOKEN == "PASTE_YOUR_BOT_TOKEN_HERE":
-        raise RuntimeError("Укажи BOT_TOKEN в переменной окружения или прямо в коде.")
-
     print("Bot started...")
     offset = None
 
