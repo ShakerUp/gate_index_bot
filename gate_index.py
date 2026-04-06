@@ -5,10 +5,12 @@ import math
 import requests
 import pytz
 import matplotlib.pyplot as plt
-from matplotlib.ticker import MultipleLocator
+from matplotlib.ticker import MultipleLocator, AutoMinorLocator
 import matplotlib.dates as mdates
 from datetime import datetime
 from dotenv import load_dotenv
+
+from binance_index import run_baverage
 
 load_dotenv()
 
@@ -1044,6 +1046,10 @@ def handle_message(message):
 
     if command == "/average":
         run_average(chat_id, text)
+        return
+      
+    if command == "/baverage":
+        run_baverage(chat_id, text, send_message)
         return
 
     if command == "/avg5":
